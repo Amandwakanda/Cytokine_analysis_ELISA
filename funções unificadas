@@ -1,0 +1,453 @@
+# ===================================================================
+#   ARQUIVO DE FUNÇÕES PARA ANÁLISE DE ELISA (VERSÃO UNIFICADA)
+#   Autor: Amanda Lima & Gemini
+#   Projeto: Adjuvants
+#   Data: 21 de agosto de 2025
+#   Descrição: Funções consolidadas para análise de dados de ELISA
+# ===================================================================
+rm(list = ls()) # Limpa o ambiente de trabalho para começar do zero
+# ===================================================================
+# 2. PAINEL DE CONTROLE (VOCÊ SÓ PRECISA EDITAR AQUI)
+# ===================================================================
+
+# --- Definições de Arquivos e Pastas ---
+caminho_arquivo_excel <- "../Data_ELISA.xlsx" # <-- MUDE AQUI
+
+
+# --- Parâmetros da Análise Específica ---
+aba_citocina <- "BMDM_TNF"
+caminho_para_salvar <- paste0("../Graficos_ELISA/", aba_citocina)
+titulo_grafico_principal <- "TNF - BMDM"
+titulo_eixo_y <- "TNF (pg/mL)" # <-- NOVO: Título personalizável para o eixo Y
+fator_de_diluicao <- 2 # <-- NOVO: Fator de diluição adicionado ao painel de controle
+
+# --- Parâmetros de Tratamentos e Fenótipos ---
+ordem_dos_tratamentos <- c("Media", "LNP-CT")
+ordem_dos_fenotipos <- c("WT", "Myd88 ko", "TLR4 ko", "CD14 ko")
+
+tratamentos_a_excluir <- c("LPS", 
+                           "SM102 Ø", "SM102", "SM102 mRNA-Luc", "SM102 2%SFB", 
+                           "SM102 10%SFB", "SM102 new", "SM102 old")
+
+tratamentos_a_renomear <- c(
+  "LNP-CT mRNA-Luc" = "LNP-CT", 
+  "LNP-CT Ø" = "LNP-CT", 
+  "LNP CT 10%SFB" = "LNP-CT",
+  "LNP CT 2%SFB" = "LNP-CT", 
+  "LNP-CT old" = "LNP-CT", 
+  "LNP-CT new" = "LNP-CT"
+)
+
+# --- Definição da Paleta de Cores ---
+paleta_de_cores <- c(
+  "Media" = "#A6A5A4",
+  "LPS" = "#DD743B",
+  "LNP-CT" = "#2EB260"
+)
+
+# --- Parâmetros para Gráficos Comparativos ---
+fenotipos_para_comparar <- c("Myd88 ko", "TLR4 ko", "CD14 ko")
+
+
+
+# --------------------------------------------------------------------
+# Carregamento de Pacotes
+# --------------------------------------------------------------------
+library(tidyverse)
+library(openxlsx)
+library(readxl)
+library(ggpubr)
+library(rstatix)
+# --------------------------------------------------------------------
+# FUNÇÃO - TEMA PERSONALIZADO PARA OS GRÁFICOS
+# --------------------------------------------------------------------
+theme_CTV <- function(base_size = 14) {
+  theme_classic(base_size = base_size) +
+  theme(
+# --- Títulos e Legendas ---
+  plot.title = element_text(hjust = 0.5, size = rel(1), face = "bold", margin = margin(b = 10, t = 10)), # Título principal: centralizado, negrito e maior.
+  legend.title = element_blank(), # Remove o título da legenda.
+  legend.position = "bottom",     # Posiciona a legenda na parte inferior do gráfico.
+  legend.text = element_text(size = rel(1.0)), # Ajusta o tamanho do texto da legenda.
+    
+  # --- Eixos ---
+  axis.title.y = element_text(size = rel(1), margin = margin(r = 10, l = 10)), # Título do eixo Y: um pouco maior e com margem.
+  axis.text.x = element_text(angle = 0, hjust = 0.5, size = rel(1.3)),   # Texto das marcações do eixo X: maior.
+  axis.text.y = element_text(size = rel(1.5)),                             # Texto das marcações do eixo Y: maior.
+    
+  # --- Títulos das Facetas (facet_wrap) ---
+  strip.text = element_text(size = rel(1.1), face = "bold", margin = margin(t = 2)), # Texto dos títulos das facetas: negrito e maior.
+  strip.background = element_rect(linetype = "blank") # Fundo do título da faceta sem bordas.
+  )
+}
+# ===================================================================
+# FUNÇÃO MESTRE PARA ANÁLISE COMPLETA DE UMA CITOCINA
+# ===================================================================
+analise_elisa <- function(arquivo_excel, 
+                          aba, 
+                          ordem_tratamento, 
+                          ordem_fenotipo, 
+                          paleta,
+                          fator_diluicao,
+                          excluir_tratamento, 
+                          renomear_tratamento, 
+                          titulo,
+                          titulo_y,
+                          caminho_salvar) {
+# --------------------------------------------------------------------
+# Mensagem de Inicio
+# --------------------------------------------------------------------
+cat(paste("\n---INiciando análise para a aba:", aba, "---\n"))
+# --------------------------------------------------------------------
+# 1. LEITURA E PREPARAÇÃO DOS DADOS
+# --------------------------------------------------------------------
+wb <- openxlsx::loadWorkbook(arquivo_excel)
+tabs <- getTables(wb, sheet = aba)
+intervalo_tabs <- attr(tabs, "refs")
+names(intervalo_tabs) <- tabs
+# Junta todos os dataframes da lista em um único dataframe.
+   
+# --------------------------------------------------------------------
+# Lê cada tabela em um dataframe separado e os une em uma lista.
+# --------------------------------------------------------------------
+lista_tabs <- map(intervalo_tabs, ~ read_excel(path = arquivo_excel,
+                                               sheet = aba,
+                                               range = .x,
+                                               col_names = TRUE,
+                                               col_types = "text") %>% 
+mutate(across(starts_with("R"), as.numeric)))
+dados <- list_rbind(lista_tabs, names_to = "Experimento") %>%
+  # Remove linhas onde todas as réplicas (R1, R2, R3) são NA.  
+  filter(!if_all(starts_with("R"), is.na)) %>%
+  # Remove tratamentos indesejados.
+  filter(!Treatment %in% excluir_tratamento) 
+# --------------------------------------------------------------------
+# Transformação para Formato Longo e Limpeza
+# --------------------------------------------------------------------
+dados_l_outlier <- dados %>%
+  mutate(Experimento = stringr::str_replace_all(Experimento, "_", " "), # Limpa nomes dos experimentos.
+         Treatment = as.character(Treatment),
+          # Renomeia os tratamentos se um vetor de renomeação for fornecido.
+          Treatment = if (!is.null(renomear_tratamento) && length(renomear_tratamento) > 0) 
+          {recode(Treatment, !!!renomear_tratamento)} else {Treatment},
+           # Converte as colunas para fatores com a ordem especificada, garantindo a ordem correta nos gráficos.
+          Fenotype = factor(Fenotype, levels = ordem_fenotipo),
+          Treatment = factor(Treatment, levels = ordem_tratamento)) %>%
+  # Transforma as colunas R1, R2, R3 em duas novas colunas: 'Replica' e 'Concentration'.
+  pivot_longer(cols = c(R1, R2, R3), 
+               names_to = "Replica",
+               values_to = "Concentration") %>%
+  mutate(Concentration = Concentration * fator_diluicao) # Multiplica a concentração por 2 (fator de diluição).
+# --------------------------------------------------------------------
+# Remoção de Outliers
+# --------------------------------------------------------------------
+dados_l <- dados_l_outlier %>%
+  group_by(Experimento, Day, Fenotype, Treatment) %>% # Calcula os outliers para cada grupo.
+  mutate(Q1 = quantile(Concentration, 0.25, na.rm = TRUE),
+         Q3 = quantile(Concentration, 0.75, na.rm = TRUE),
+         IQR = Q3 - Q1,
+         limite_inferior = Q1 - 1.5 * IQR, # Limite inferior.
+         limite_superior = Q3 + 1.5 * IQR) %>%   # Limite superior.
+  # Mantém apenas os valores dentro dos limites.
+  filter(Concentration >= limite_inferior & Concentration <= limite_superior) %>% 
+  ungroup() %>%
+  select(-c(Q1, Q3, IQR, limite_inferior, limite_superior)) # Remove colunas auxiliares.
+# --------------------------------------------------------------------
+# Cálculo de Estatísticas (Formato Wide)
+# --------------------------------------------------------------------
+dados_w <- dados_l %>% 
+  group_by(Experimento, Day, Fenotype, Treatment) %>% 
+  summarise(media = mean(Concentration, na.rm = TRUE),
+            sd = sd(Concentration, na.rm = TRUE),n = n(),
+            sem = sd / sqrt(n),
+           .groups = "drop")
+
+# --------------------------------------------------------------------
+#Agregação dos Dados (Pool)
+# --------------------------------------------------------------------
+dados_pool <- dados_w %>%
+  group_by(Day, Fenotype, Treatment) %>%
+  summarise(media_pool = mean(media, na.rm = TRUE),
+            sd_pool = sd(media, na.rm = TRUE),
+            n = n(),
+            sem_pool = sd_pool / sqrt(n),
+          .groups = "drop")
+# --------------------------------------------------------------------
+# Gráfico Pool (gg_pool)
+# --------------------------------------------------------------------
+gg_pool <- ggplot(data = dados_pool,
+                  aes(x = Fenotype, 
+                      #color = Treatment, 
+                      group = Treatment)) +
+  
+geom_col(aes(y= media_pool, 
+              fill = Treatment),
+        color = "black",
+        position = position_dodge(width = 0.9),
+        width = 0.9,
+        alpha = 0.3) +
+  
+geom_jitter(data = dados_w,
+          aes(y = media, 
+              color = Treatment),
+          position = position_dodge(0.9),
+          size = 3, 
+          alpha = 0.8,
+          show.legend = FALSE,
+          na.rm = TRUE) +
+  
+geom_errorbar(aes(x = Fenotype, ymin = media_pool, 
+                  ymax = media_pool + sem_pool, 
+                  group = Treatment),
+              width = 0.3, 
+              position = position_dodge(0.9),
+              color = "black",
+              show.legend = FALSE) +
+# --------------------------------------------------------------------
+# Estatística:
+# --------------------------------------------------------------------
+ggpubr::geom_pwc(data = dados_w,
+                 aes(x = Fenotype, y = media),
+                 method = "dunn_test", 
+                 p.adjust.method = "bonferroni",
+                 hide.ns = "p.adj",
+                 label = "p.adj.signif", 
+                 size = 0.8, 
+                 label.size = 5) +
+# --------------------------------------------------------------------
+# Cores, escalas e facetas
+# -------------------------------------------------------------------- 
+scale_color_manual(values = paleta) +
+  scale_fill_manual(values = paleta)+
+  facet_wrap(~ Day, ncol = 2,scales = "free", axes = "all_y") +
+  coord_cartesian(ylim = c(0, NA), clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  guides(color = guide_legend(override.aes = list(size = 7))) +
+# --------------------------------------------------------------------
+# Titulos e Etiquetas
+# --------------------------------------------------------------------
+labs(title = titulo,
+     x = NULL,
+     y = titulo_y,
+     color = NULL) +
+  
+# --------------------------------------------------------------------
+# Edição e Salvamento
+# --------------------------------------------------------------------
+theme_CTV()
+# --------------------------------------------------------------------
+# Gráficos de Cada experimento (gg_individuais)
+# --------------------------------------------------------------------
+gg_individuais <- ggplot(data = dados_w, 
+                         aes(x = Fenotype, 
+                             color = Treatment, 
+                             group = Treatment)) + 
+  
+geom_col( aes(y = media),
+          fill = "white", # Define o preenchimento como branco, fora do aes()
+          color = "black", # Define a cor do contorno da barra
+          position = position_dodge(width = 0.9), 
+          width = 0.9) +
+  
+geom_jitter(data = dados_l,
+            aes(y = Concentration),
+            position = position_dodge(0.9),
+            size = 2,
+            alpha = 0.8,
+            na.rm = TRUE) +
+  
+geom_errorbar(aes(x = Fenotype, ymin = media, 
+                  ymax = media + sem, 
+                  group = Treatment),
+              width = 0.8, 
+              position = position_dodge(0.9),
+              show.legend = FALSE) +
+# --------------------------------------------------------------------
+# Cores, escalas e facetas
+# --------------------------------------------------------------------
+scale_color_manual(values = paleta) +
+  facet_wrap(~ Experimento + Day, ncol = 2, scales = "free") +
+  coord_cartesian(ylim = c(0, NA), clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+# --------------------------------------------------------------------
+# Titulos e Etiquetas
+# --------------------------------------------------------------------
+labs(title = titulo,
+     x = NULL,
+     y = titulo_y,
+     color = "Treatment") +
+# --------------------------------------------------------------------
+# Edição e Salvamento
+# --------------------------------------------------------------------
+theme_CTV()
+# --------------------------------------------------------------------
+# Retorno dos Resultados
+# --------------------------------------------------------------------
+return(list(dados_l = dados_l, 
+            dados_w = dados_w, 
+            dados_pool = dados_pool, 
+            gg_pool = gg_pool, 
+            gg_individuais = gg_individuais))
+}
+# ===================================================================
+# FUNÇÃO 3: criar_grafico_comparativo
+# ===================================================================]
+criar_grafico_comparativo <- function(dados_w_orig,
+                                      dados_pool_orig,
+                                      fenotipo_alvo,
+                                      titulo_do_grafico,
+                                      paleta_de_cores,
+                                      titulo_y = titulo_eixo_y) {
+# --------------------------------------------------------------------
+# Passo 1: Filtragem dos Dados
+# --------------------------------------------------------------------
+# Seleciona apenas as linhas correspondentes ao "WT" e ao fenótipo alvo.
+fenotipos_a_manter <- c("WT", fenotipo_alvo)
+  
+dados_pool_filtrado <- dados_pool_orig %>%
+  filter(Fenotype %in% fenotipos_a_manter)
+  
+dados_w_filtrado <- dados_w_orig %>%
+  filter(Fenotype %in% fenotipos_a_manter) %>%
+  group_by(Experimento, Day, Treatment) %>%
+  # Garante que, para um mesmo experimento, ambos os fenótipos ("WT" e alvo) estejam presentes.
+  filter(all(fenotipos_a_manter %in% Fenotype)) %>%
+  ungroup()
+  
+# Se o filtro não retornar dados (ex: nenhum experimento tem ambos os fenótipos), a função para aqui.
+#if(nrow(dados_w_filtrado) == 1) return(NULL)
+
+# --------------------------------------------------------------------
+# Grafico Comparativo
+# --------------------------------------------------------------------
+gg_comparativo <- ggplot(data = dados_pool_filtrado, aes(x = Fenotype, y = media_pool, fill = Treatment)) +
+
+geom_col(color = "black",
+         position = position_dodge(width = 0.9),
+         width = 0.9,
+         alpha = 0.3) +
+  
+geom_errorbar(aes(ymin = media_pool, 
+                  ymax = media_pool + sem_pool), # Corrigido para erro simétrico
+              width = 0.28, 
+              position = position_dodge(0.9),
+              show.legend = FALSE) +
+  
+geom_jitter(data = dados_w_filtrado,
+            aes(x = Fenotype, 
+                y = media, 
+                color = Treatment),
+            inherit.aes = FALSE,
+            size = 2.5,
+            position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.9),
+            show.legend = FALSE) +
+# --------------------------------------------------------------------
+# Cores, escalas e facetas
+# --------------------------------------------------------------------
+scale_color_manual(values = paleta_de_cores, drop = FALSE) +
+  scale_fill_manual(values = paleta_de_cores, drop = FALSE) +
+  facet_wrap(~ Day, ncol = 2, scales = "free") +
+  coord_cartesian(ylim = c(0, NA), clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+
+# --------------------------------------------------------------------
+# Titulos e Etiquetas
+# --------------------------------------------------------------------
+labs(title = titulo_do_grafico,
+     x = NULL,
+     y = titulo_y,
+     fill = "Treatment") +
+# --------------------------------------------------------------------
+# Edição e Salvamento
+# --------------------------------------------------------------------
+theme_CTV()
+# --------------------------------------------------------------------
+# Retorno dos Resultados
+# --------------------------------------------------------------------
+
+return(gg_comparativo)
+}
+# ===================================================================
+# 4. EXECUÇÃO DA ANÁLISE
+# ===================================================================
+
+# --- Cria a pasta de resultados se ela não existir ---
+if (!dir.exists(caminho_para_salvar)) {
+  dir.create(caminho_para_salvar)
+}
+
+# --- Roda a análise principal ---
+resultados_analise <- analise_elisa(
+  arquivo_excel = caminho_arquivo_excel,
+  aba = aba_citocina,
+  titulo = titulo_grafico_principal,
+  fator_diluicao = fator_de_diluicao, # <-- ATUALIZADO: Usando a variável do painel
+  titulo_y = titulo_eixo_y,           # <-- NOVO: Passando o título do eixo Y para a função
+  ordem_tratamento = ordem_dos_tratamentos,
+  ordem_fenotipo = ordem_dos_fenotipos,
+  excluir_tratamento = tratamentos_a_excluir,
+  renomear_tratamento = tratamentos_a_renomear,
+  paleta = paleta_de_cores
+)
+# --- Salva os gráficos principais ---
+if (!is.null(resultados_analise)) {
+  
+  ggsave(
+    filename = file.path(caminho_para_salvar, paste0(aba_citocina, "_pool.png")),
+    plot = resultados_analise$gg_pool,
+    width = 14, height = 7, dpi = 300
+  )
+  cat(paste("Gráfico Pool salvo em:", caminho_para_salvar, "\n"))
+  
+  ggsave(
+    filename = file.path(caminho_para_salvar, paste0(aba_citocina, "_individuais.png")),
+    plot = resultados_analise$gg_individuais,
+    width = 8, height = 15, dpi = 300
+  )
+  cat(paste("Gráficos Individuais salvos em:", caminho_para_salvar, "\n"))
+  
+  # --- Gera e salva os gráficos comparativos ---
+  for (fenotipo in fenotipos_para_comparar) {
+    
+    titulo_comparativo <- paste(titulo_grafico_principal, "- WT vs", fenotipo)
+    
+    gg_comparativo <- criar_grafico_comparativo(
+      dados_w_orig = resultados_analise$dados_w,
+      dados_pool_orig = resultados_analise$dados_pool,
+      fenotipo_alvo = fenotipo,
+      titulo_do_grafico = titulo_comparativo,
+      paleta_de_cores = paleta_de_cores,
+      titulo_y = titulo_eixo_y # <-- NOVO: Passando o título também para os gráficos comparativos
+    )
+    
+    if (!is.null(gg_comparativo)) {
+      nome_arquivo_comp <- paste0(aba_citocina, "_WT_vs_", gsub(" ", "_", fenotipo), ".png")
+      ggsave(
+        filename = file.path(caminho_para_salvar, nome_arquivo_comp),
+        plot = gg_comparativo,
+        width = 6, height = 6, dpi = 300
+      )
+      cat(paste("Gráfico Comparativo para", fenotipo, "salvo.\n"))
+    }
+  }
+  
+  # --- Salva os dados processados ---
+  write.xlsx(
+    resultados_analise$dados_l,
+    file = file.path(caminho_para_salvar, paste0(aba_citocina, "_dados_processados_long.xlsx"))
+  )
+  write.xlsx(
+    resultados_analise$dados_w,
+    file = file.path(caminho_para_salvar, paste0(aba_citocina, "_dados_processados_wide.xlsx"))
+  )
+  cat(paste("Dados processados salvos em:", caminho_para_salvar, "\n"))
+  
+  cat("\n--- ANÁLISE CONCLUÍDA COM SUCESSO! ---\n")
+  
+  print(resultados_analise$grafico_pool)
+  
+} else {
+  cat("\n--- A ANÁLISE FALHOU. VERIFIQUE OS PARÂMETROS E O ARQUIVO DE DADOS. ---\n")
+}
